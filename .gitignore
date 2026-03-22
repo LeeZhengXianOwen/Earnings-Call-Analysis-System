@@ -143,6 +143,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+*.env
 
 # Spyder project settings
 .spyderproject
@@ -205,3 +206,24 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Data and Transcripts
+*.pdf
+data/
+raw_text/
+cleaned_transcripts/
+sentence_data/
+chunk_data/
+retriever_data/
+llm_data/
+
+# FAISS index and Embeddings
+*.index
+*.npy
+
+# Google Drive credentials if any
+credentials.json
+token.json
+
+# Notebook Checkpoints
+.ipynb_checkpoints/
