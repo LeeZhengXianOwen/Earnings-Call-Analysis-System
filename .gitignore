@@ -210,20 +210,18 @@ __marimo__/
 # Data and Transcripts
 *.pdf
 data/
-raw_text/
-cleaned_transcripts/
-sentence_data/
-chunk_data/
-retriever_data/
-llm_data/
+Transcripts/
+Results/raw_text/
+Results/cleaned_transcripts/
+Results/sentence_data/
+Results/chunk_data/
+Results/retriever_data/
+Results/llm_data/
 
-# FAISS index and Embeddings
+# FAISS index and embeddings
 *.index
 *.npy
 
-# Google Drive credentials if any
+# Google Drive credentials
 credentials.json
 token.json
-
-# Notebook Checkpoints
-.ipynb_checkpoints/
