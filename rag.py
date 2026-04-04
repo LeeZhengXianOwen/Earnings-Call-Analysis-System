@@ -4,42 +4,75 @@ import faiss
 from pathlib import Path
 import pandas as pd
 from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
 from groq import Groq
 
 # Token limit problems with current LLM - will explore other options
 
-def retrieve(query, model, index, chunks, top_k = 5, filter_company = None, filter_quarter = None):
+def extract_filters(query):
+    """
+    Basic function to extract company and quarter (or other metadata filters)
+    from the user query, to aid in the retrieval process.
+    """
+    company = []
+    quarter = []
+
+    for comp in companies:
+        if comp.lower() in query.lower() and comp.lower() not in company:
+            company.append(comp)
+
+    for q in quarters:
+        if q.lower() in query.lower() and q.lower() not in quarter:
+            quarter.append(q)
+
+    if not company:
+        company = None
+    if not quarter:
+        quarter = None
+    return company, quarter
+
+from qdrant_client.models import Filter, FieldCondition, MatchAny
+
+def retrieve(query, model, db, top_k=5, filter_company=None, filter_quarter=None):
     # Embed the query
-    q_emb = model.encode([query], convert_to_numpy = True)
-    faiss.normalize_L2(q_emb)
+    q_emb = model.encode([query], convert_to_numpy=True)[0].tolist()
 
-    # Search — over-fetch to allow for filtering
-    scores, indices = index.search(q_emb, top_k * 3)
+    # Build metadata filter if provided
+    conditions = []
+    if filter_company:
+        companies = filter_company if isinstance(filter_company, list) else [filter_company]
+        conditions.append(FieldCondition(key="company", match=MatchAny(any=companies)))
+    if filter_quarter:
+        quarters = filter_quarter if isinstance(filter_quarter, list) else [filter_quarter]
+        conditions.append(FieldCondition(key="quarter", match=MatchAny(any=quarters)))
 
-    results = []
-    for score, idx in zip(scores[0], indices[0]):
-        row = chunks.iloc[idx]
+    search_filter = Filter(must=conditions) if conditions else None
 
-        # Optional filters
-        if filter_company and row["company"].lower() != filter_company.lower():
-            continue
-        if filter_quarter and row["quarter"] != filter_quarter:
-            continue
+    # Search — filter applied inside Qdrant, no over-fetching needed
+    results = db.query_points(
+        collection_name="chunks",
+        query=q_emb,
+        query_filter=search_filter,
+        limit=top_k,
+        with_payload=True
+    )
 
-        results.append({
-            "chunk_id": row["chunk_id"],
-            "company": row["company"],
-            "quarter": row["quarter"],
-            "score": float(score),
-            "chunk_text": row["chunk_text"]
-        })
-
-        if len(results) == top_k:
-            break
-
-    return results
+    return [
+        {
+            "chunk_id":   r.payload["chunk_id"],
+            "company":    r.payload["company"],
+            "quarter":    r.payload["quarter"],
+            "score":      r.score,
+            "chunk_text": r.payload["chunk_text"]
+        }
+        for r in results.points
+    ]
 
 def build_prompt(query, retrieved_chunks):
+    """
+    Builds the augmented prompt using the user query and retrieved chunks
+    to be fed into the LLM.
+    """
     context = "\n\n".join([
         f"[{chunk['company']}]\n{chunk['chunk_text']}"
         for chunk in retrieved_chunks
@@ -51,8 +84,8 @@ def build_prompt(query, retrieved_chunks):
     )
     return prompt
 
-def generate(prompt, client):
-    response = client.chat.completions.create(
+def generate(prompt, llm):
+    response = llm.chat.completions.create(
         model = "llama-3.1-8b-instant",
         messages = [{"role": "user", "content": prompt}],
         temperature = 0.0,
@@ -66,9 +99,12 @@ if __name__ == "__main__":
     load_dotenv()
     BASE_DIR = Path(__file__).parent
     model = SentenceTransformer("all-MiniLM-L6-v2")
-    index = faiss.read_index(str(BASE_DIR / "Results" / "retriever_data" / "faiss.index"))
-    chunks = pd.read_csv(str(BASE_DIR / "Results" / "chunk_data" / "rag_chunks.csv"))
-    client = Groq(api_key = os.getenv("GROQ_API_KEY")) # Your LLM/API key here
+    db = QdrantClient(path=str(BASE_DIR / "Results" / "retriever_data" / "qdrant_store"))
+    llm = Groq(api_key = os.getenv("GROQ_API_KEY")) # Your LLM/API key here
+    companies = [c.payload["company"] for c in db.scroll(collection_name="chunks", limit=10000)[0]]
+    companies = list(set(companies))
+    quarters = [c.payload["quarter"] for c in db.scroll(collection_name="chunks", limit=10000)[0]]
+    quarters = list(set(quarters))
 
     print("Type 'quit' to exit\n")
 
@@ -81,12 +117,12 @@ if __name__ == "__main__":
         if not query:
             continue
 
-        # Placeholder line to fish out company and quarter for retrieve function parameter
-        # Subject to change in retrieval
+        filtered_company, filtered_quarter = extract_filters(query)
 
-        retrieved_chunks = retrieve(query, model, index, chunks, top_k = 5)
+        retrieved_chunks = retrieve(query, model, db, top_k=5, 
+                                    filter_company=filtered_company, filter_quarter=filtered_quarter)
         prompt = build_prompt(query, retrieved_chunks)
-        answer = generate(prompt, client)
+        answer = generate(prompt, llm)
         
         print(f"\nAnswer: {answer}\n")
         print(f"Retrieved chunks: \n")
