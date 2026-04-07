@@ -1,13 +1,25 @@
 import os
+import re
 from dotenv import load_dotenv
-import faiss
 from pathlib import Path
-import pandas as pd
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchAny
 from groq import Groq
 
+# Load global parameters (models, data etc.)
+BASE_DIR = Path(__file__).parent
+load_dotenv()
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+vector_db = QdrantClient(path=str(BASE_DIR / "Results" / "retriever_data" / "qdrant_store"))
+reranking_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+llm = Groq(api_key = os.getenv("GROQ_API_KEY")) # Your LLM/API key here
 # Token limit problems with current LLM - will explore other options
+
+companies = [c.payload["company"] for c in vector_db.scroll(collection_name="chunks", limit=10000)[0]]
+companies = list(set(companies))
+quarters = [c.payload["quarter"] for c in vector_db.scroll(collection_name="chunks", limit=10000)[0]]
+quarters = list(set(quarters))
 
 def extract_filters(query):
     """
@@ -18,22 +30,21 @@ def extract_filters(query):
     quarter = []
 
     for comp in companies:
-        if comp.lower() in query.lower() and comp.lower() not in company:
-            company.append(comp)
+        if re.search(rf"\b{re.escape(comp)}\b", query, re.IGNORECASE) and comp.lower() not in company:
+                company.append(comp)
 
     for q in quarters:
-        if q.lower() in query.lower() and q.lower() not in quarter:
+        if re.search(rf"\b{re.escape(q)}\b", query, re.IGNORECASE) and q.lower() not in quarter:
             quarter.append(q)
 
-    if not company:
-        company = None
-    if not quarter:
-        quarter = None
-    return company, quarter
+    return (company or None), (quarter or None)
 
-from qdrant_client.models import Filter, FieldCondition, MatchAny
-
-def retrieve(query, model, db, top_k=5, filter_company=None, filter_quarter=None):
+def retrieve(query, model, db, reranker, top_k=5, filter_company=None, filter_quarter=None):
+    """
+    Retrieves top k chunks relevant to the query.
+    Uses bi-encoder with metadata filtering first,
+    then applies cross-encoder reranking on the retrieved set.
+    """
     # Embed the query
     q_emb = model.encode([query], convert_to_numpy=True)[0].tolist()
 
@@ -48,16 +59,16 @@ def retrieve(query, model, db, top_k=5, filter_company=None, filter_quarter=None
 
     search_filter = Filter(must=conditions) if conditions else None
 
-    # Search — filter applied inside Qdrant, no over-fetching needed
+    # Bi-encoder retrieval with metadata filtering
     results = db.query_points(
         collection_name="chunks",
         query=q_emb,
         query_filter=search_filter,
-        limit=top_k,
+        limit=10, # Set limit based on number of chunks in database (can be tuned); ideally more than top_k
         with_payload=True
     )
 
-    return [
+    retrieved = [
         {
             "chunk_id":   r.payload["chunk_id"],
             "company":    r.payload["company"],
@@ -67,6 +78,16 @@ def retrieve(query, model, db, top_k=5, filter_company=None, filter_quarter=None
         }
         for r in results.points
     ]
+
+    # Reranking with cross-encoder
+    pairs = [(query, chunk["chunk_text"]) for chunk in retrieved]
+    rerank_scores = reranker.predict(pairs)
+
+    for i, chunk in enumerate(retrieved):
+        chunk["rerank_score"] = rerank_scores[i]
+
+    reranked_chunks = sorted(retrieved, key=lambda x: x["rerank_score"], reverse=True)
+    return reranked_chunks[:top_k]
 
 def build_prompt(query, retrieved_chunks):
     """
@@ -79,7 +100,7 @@ def build_prompt(query, retrieved_chunks):
     ])
     prompt = (
         f"{query}\n\n"
-        f"Use ONLY the information from the exercpts provided below to answer the question.\n\n"
+        f"Use ONLY the information from the excerpts provided below to answer the question.\n\n"
         f"Relevant excerpts from earnings call transcripts:\n{context}"
     )
     return prompt
@@ -95,22 +116,10 @@ def generate(prompt, llm):
 
 
 if __name__ == "__main__":
-    # Load global parameters (models, data etc.)
-    load_dotenv()
-    BASE_DIR = Path(__file__).parent
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    db = QdrantClient(path=str(BASE_DIR / "Results" / "retriever_data" / "qdrant_store"))
-    llm = Groq(api_key = os.getenv("GROQ_API_KEY")) # Your LLM/API key here
-    companies = [c.payload["company"] for c in db.scroll(collection_name="chunks", limit=10000)[0]]
-    companies = list(set(companies))
-    quarters = [c.payload["quarter"] for c in db.scroll(collection_name="chunks", limit=10000)[0]]
-    quarters = list(set(quarters))
-
     print("Type 'quit' to exit\n")
 
     while True:
         query = input("Your question: ").strip()
-
         if query.lower() == "quit":
             print("Goodbye!")
             break
@@ -119,12 +128,13 @@ if __name__ == "__main__":
 
         filtered_company, filtered_quarter = extract_filters(query)
 
-        retrieved_chunks = retrieve(query, model, db, top_k=5, 
+        retrieved_chunks = retrieve(query, embedding_model, vector_db, reranking_model, top_k=5, 
                                     filter_company=filtered_company, filter_quarter=filtered_quarter)
+        print(retrieved_chunks)
         prompt = build_prompt(query, retrieved_chunks)
         answer = generate(prompt, llm)
         
         print(f"\nAnswer: {answer}\n")
         print(f"Retrieved chunks: \n")
         for i, chunk in enumerate(retrieved_chunks, 1):
-            print(f"  {i}. {chunk['company']} {chunk['quarter']} - {chunk['chunk_text'][:60]}... {chunk['score']}\n")
+            print(f"  {i}. {chunk['company']} {chunk['quarter']} - {chunk['chunk_text'][:60]}... {chunk['rerank_score']}\n")
