@@ -1,5 +1,10 @@
 # Earnings-Call-Analysis-System
 
+Earning Call Transcripts:  
+
+Inside the Transcript Folder  
+
+
 Data prep:
 
 DSA4265_01_data_prep.ipynb
