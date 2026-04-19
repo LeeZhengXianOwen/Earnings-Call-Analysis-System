@@ -17,8 +17,8 @@ Final model with filtering of pseudo-labeling: DSA4265_Project_BERT_final_versio
 
 RAG:
 
-DSA4265_RAG_V2.ipynb  
+DSA4265_RAG_V2.ipynb covers the chunking strategy (long-turn splitting + sliding window), FAISS indexing, baseline retrieval and evaluation metrics.
 
 Final Pipeline:
 
-Final_FinBERT_RAG_Pipeline.ipynb  
+Final_FinBERT_RAG_Pipeline.ipynb covers the multi-task model architecture (sentiment + topic heads), the ask_auto() end-to-end pipeline with Gemini, and the evaluation results table comparing all three retrieval strategies.
