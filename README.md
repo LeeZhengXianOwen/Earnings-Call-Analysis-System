@@ -2,7 +2,7 @@
 
 Earning Call Transcripts:  
 
-Inside the Transcript Folder  
+Inside the Transcripts Folder  
 
 
 Data prep:
